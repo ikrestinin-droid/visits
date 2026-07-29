@@ -1,24 +1,35 @@
 {
+  "id": "/visits/",
   "name": "Визиты · Отдел продаж",
   "short_name": "Визиты",
   "description": "Выездные визиты менеджеров: GPS, фото, опросный лист",
-  "start_url": "index.html",
+  "lang": "ru",
+  "dir": "ltr",
+  "start_url": "/visits/index.html",
+  "scope": "/visits/",
   "display": "standalone",
   "background_color": "#f5f6f8",
   "theme_color": "#1f6feb",
   "orientation": "portrait",
+  "categories": ["business", "productivity"],
   "icons": [
     {
-      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='192' height='192'%3E%3Crect width='192' height='192' rx='42' fill='%231f6feb'/%3E%3Ctext x='96' y='132' font-size='104' text-anchor='middle' fill='white'%3E%F0%9F%93%8D%3C/text%3E%3C/svg%3E",
+      "src": "icon-192.png",
       "sizes": "192x192",
-      "type": "image/svg+xml",
-      "purpose": "any maskable"
+      "type": "image/png",
+      "purpose": "any"
     },
     {
-      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='512' height='512'%3E%3Crect width='512' height='512' rx='112' fill='%231f6feb'/%3E%3Ctext x='256' y='352' font-size='280' text-anchor='middle' fill='white'%3E%F0%9F%93%8D%3C/text%3E%3C/svg%3E",
+      "src": "icon-512.png",
       "sizes": "512x512",
-      "type": "image/svg+xml",
-      "purpose": "any maskable"
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }
