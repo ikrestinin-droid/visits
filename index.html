@@ -129,6 +129,21 @@ const DB = {
   del(id){ localStorage.setItem('visits',JSON.stringify(DB.all().filter(v=>v.id!==id))); }
 };
 
+/* ---------- Jotform ---------- */
+const JOTFORM = {
+  action:'https://submit.jotform.com/submit/262044876111049',
+  formID:'262044876111049',
+  map:{ manager:'q2_q2_textbox0', datetime:'q3_q3_textbox1', gps:'q4_q4_textbox2',
+    address:'q5_q5_textbox3', company:'q6_q6_textbox4', inn:'q7_q7_textbox5',
+    contact:'q8_q8_textbox6', phone:'q9_q9_textbox7', photos:'q10_q10_fileupload8[]',
+    photoNotes:'q11_q11_textarea9',
+    equip:'q12_q12_textarea10', needs:'q13_q13_textarea11', result:'q14_q14_dropdown12',
+    next:'q15_q15_textbox13', comment:'q16_q16_textarea14' }
+};
+
+/* ---------- Пользователь (идентификация менеджера) ---------- */
+let user=null; try{user=JSON.parse(localStorage.getItem('user')||'null')}catch(e){}
+
 /* ---------- Состояние ---------- */
 let view={name:'list'}, cur=null;
 
@@ -144,7 +159,7 @@ function restoreDraft(){
   return false;
 }
 /* Любая ошибка — на экран и в лог сервера (удалённая диагностика) */
-const APP_V='5';
+const APP_V='7';
 function beacon(tag,msg){ try{ fetch('/__log/'+tag+'?v='+APP_V+'&m='+encodeURIComponent((msg||'').slice(0,300))).catch(()=>{});}catch(e){} }
 window.addEventListener('error',e=>{ toast('Ошибка: '+e.message); beacon('err', e.message+' @'+(e.filename||'')+':'+(e.lineno||'')); });
 window.addEventListener('unhandledrejection',e=>{ beacon('rej', String(e.reason)); });
@@ -154,14 +169,46 @@ const esc=s=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"
 function toast(t){const el=$('#toast');el.textContent=t;el.classList.add('show');
   clearTimeout(el._t);el._t=setTimeout(()=>el.classList.remove('show'),1900);}
 function fmtDate(ts){const d=new Date(ts);return d.toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'});}
+/* Для CRM — полный год, чтобы даты сортировались и читались однозначно */
+function fmtDateFull(ts){const d=new Date(ts);return d.toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});}
 
 /* ---------- Навигация ---------- */
 function go(v){ view=v; saveDraft(); render(); window.scrollTo(0,0); }
 function newVisit(){
   cur={ id:'v'+Date.now(), created:Date.now(), status:'local',
+    manager:user?user.name:'', managerPhone:user?user.phone:'',
     gps:null, address:'', company:'', inn:'', contact:'', phone:'',
     photos:[], equip:{}, needs:{}, result:'', next:'', comment:'' };
   go({name:'step',i:0});
+}
+
+/* ---------- Вход ---------- */
+function renderLogin(){
+  $('#title').textContent='Вход';
+  $('#stepLabel').textContent='v'+APP_V;
+  $('#back').style.display='none';
+  app.innerHTML=`<div class="card" style="margin-top:30px">
+    <h2>👤 Кто вы?</h2>
+    <div class="muted">Имя будет привязано ко всем вашим визитам.</div>
+    <label>Фамилия Имя Отчество</label>
+    <input id="loginName" placeholder="Иванов Пётр Сергеевич" autocomplete="name">
+    <label>Телефон (необязательно)</label>
+    <input id="loginPhone" inputmode="tel" placeholder="+7 ...">
+    <button class="btn" onclick="doLogin()">Войти</button>
+  </div>`;
+}
+function doLogin(){
+  const name=$('#loginName').value.trim();
+  if(name.length<5){ toast('Введите полное ФИО'); return; }
+  user={name, phone:$('#loginPhone').value.trim()};
+  localStorage.setItem('user',JSON.stringify(user));
+  toast('Добро пожаловать, '+name.split(' ')[0]+'!');
+  go({name:'list'});
+}
+function logout(){
+  if(confirm('Выйти? Сохранённые визиты останутся на устройстве.')){
+    localStorage.removeItem('user'); user=null; render();
+  }
 }
 
 /* ---------- GPS ---------- */
@@ -199,6 +246,7 @@ function addPhoto(input){
 
 /* ---------- Рендер ---------- */
 function render(){
+  if(!user) return renderLogin();
   const back=$('#back');
   back.style.display = view.name==='list' ? 'none':'inline-block';
   back.onclick=()=>{
@@ -219,9 +267,11 @@ function render(){
 
 function renderList(){
   $('#title').textContent='Мои визиты';
-  $('#stepLabel').textContent='v'+APP_V;
+  $('#stepLabel').textContent='v'+APP_V+' · '+(user.name.split(' ')[0]||'');
   const v=DB.all();
-  app.innerHTML = v.length? v.map(x=>`
+  app.innerHTML = `<div class="muted" style="margin-bottom:10px">👤 ${esc(user.name)}
+    · <a href="#" onclick="logout();return false" style="color:var(--brand)">выйти</a></div>`;
+  app.innerHTML += v.length? v.map(x=>`
     <div class="visit" onclick="go({name:'view',id:'${x.id}'})">
       <div class="ico">📍</div>
       <div style="flex:1;min-width:0">
@@ -349,8 +399,11 @@ function renderView(){
    <div class="card">
      <span class="badge ${v.status==='sent'?'sent':'local'}">${v.status==='sent'?'В CRM':'Локально'}</span>
      <h2 style="margin-top:10px">🏢 ${esc(v.company)||'—'}</h2>
-     <div class="muted">ИНН ${esc(v.inn)||'—'} · ${fmtDate(v.created)}</div>
+     <div class="muted">ИНН ${esc(v.inn)||'—'}</div>
      <p>${esc(v.contact)} · ${esc(v.phone)}</p>
+     <hr>
+     <div class="muted">🗓 Дата визита: <b>${fmtDateFull(v.created)}</b></div>
+     <div class="muted">👤 Менеджер: <b>${esc(v.manager)||'—'}</b></div>
      ${v.gps?`<div class="pill">📍 ${v.gps.lat}, ${v.gps.lng}</div>`:''}
      ${v.address?`<div class="muted">${esc(v.address)}</div>`:''}
    </div>
@@ -360,16 +413,53 @@ function renderView(){
    ${needs.length?`<div class="card"><h2>Потребность</h2>${needs.map(n=>`<div class="pill">${n}${v.needs[n].vol?' · '+esc(v.needs[n].vol):''}</div>`).join('')}</div>`:''}
    <div class="card"><h2>Итог</h2><p><b>${esc(v.result)||'—'}</b></p>
      <p class="muted">След. шаг: ${esc(v.next)||'—'}</p>${v.comment?`<p>${esc(v.comment)}</p>`:''}</div>
-   <button class="btn" onclick="sendToCRM('${v.id}')">⇪ Отправить в Битрикс24</button>
+   <button class="btn" onclick="sendToCRM('${v.id}')">⇪ Отправить в Jotform</button>
    <button class="btn sec" onclick="exportVisit('${v.id}')">Выгрузить JSON</button>
    <button class="btn ghost" onclick="if(confirm('Удалить визит?')){DB.del('${v.id}');go({name:'list'})}">Удалить</button>`;
 }
 
-function sendToCRM(id){
-  // Заглушка интеграции: пока помечаем локально. Реальную отправку в коробочный
-  // Битрикс24 (REST / вебхук) подключим на следующем шаге, когда будет доступ.
-  const v=DB.get(id); v.status='sent'; DB.save(v);
-  toast('Отмечено как отправленное (интеграция с Б24 — след. шаг)'); render();
+function dataURLtoBlob(d){
+  const [h,b]=d.split(','), mime=(h.match(/:(.*?);/)||[])[1]||'image/jpeg',
+    bin=atob(b), a=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++)a[i]=bin.charCodeAt(i);
+  return new Blob([a],{type:mime});
+}
+
+async function sendToCRM(id){
+  const v=DB.get(id); if(!v)return;
+  if(!navigator.onLine){ toast('Нет сети — попробуйте позже'); return; }
+  toast('Отправляю…');
+  const m=JOTFORM.map, fd=new FormData();
+  fd.append('formID',JOTFORM.formID);
+  const mgrName=v.manager||(user?user.name:''), mgrPhone=v.managerPhone||(user?user.phone:'');
+  fd.append(m.manager, mgrName+(mgrPhone?' ('+mgrPhone+')':''));
+  fd.append(m.datetime, fmtDateFull(v.created));
+  fd.append(m.gps, v.gps?`${v.gps.lat}, ${v.gps.lng} (±${v.gps.acc} м)`:'');
+  fd.append(m.address, v.address||'');
+  fd.append(m.company, v.company||'');
+  fd.append(m.inn, v.inn||'');
+  fd.append(m.contact, v.contact||'');
+  fd.append(m.phone, v.phone||'');
+  fd.append(m.photoNotes, v.photos.map((p,i)=>`Фото ${i+1}: ${p.note||'—'}`).join('\n'));
+  fd.append(m.equip, Object.keys(v.equip).filter(g=>v.equip[g].items&&v.equip[g].items.length)
+    .map(g=>g+': '+v.equip[g].items.join(', ')).join('\n')||'не отмечено');
+  fd.append(m.needs, Object.keys(v.needs).map(n=>{
+    const d=v.needs[n];
+    return n+(d.vol?' — '+d.vol:'')+(d.supplier?' (поставщик: '+d.supplier+')':'')+(d.note?' — '+d.note:'');
+  }).join('\n')||'не отмечено');
+  fd.append(m.result, v.result||'');
+  fd.append(m.next, v.next||'');
+  fd.append(m.comment, v.comment||'');
+  v.photos.forEach((p,i)=>{ try{fd.append(m.photos, dataURLtoBlob(p.data), `photo${i+1}.jpg`);}catch(e){} });
+  try{
+    await fetch(JOTFORM.action,{method:'POST',body:fd,mode:'no-cors'});
+    v.status='sent'; v.sentAt=Date.now(); DB.save(v);
+    toast('Визит отправлен в Jotform ✓');
+  }catch(e){
+    toast('Не удалось отправить: '+e.message);
+    beacon('senderr', e.message);
+  }
+  render();
 }
 function exportVisit(id){
   const v=DB.get(id); const blob=new Blob([JSON.stringify(v,null,2)],{type:'application/json'});
