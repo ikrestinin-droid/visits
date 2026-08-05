@@ -124,7 +124,14 @@ const RESULT = ["Перспективный","Думают","Отказ","Нуж
 const DB = {
   all(){ try{return JSON.parse(localStorage.getItem('visits')||'[]')}catch(e){return[]} },
   save(v){ const a=DB.all(); const i=a.findIndex(x=>x.id===v.id);
-    if(i>=0)a[i]=v; else a.unshift(v); localStorage.setItem('visits',JSON.stringify(a)); },
+    if(i>=0)a[i]=v; else a.unshift(v);
+    try{ localStorage.setItem('visits',JSON.stringify(a)); return true; }
+    catch(e){
+      /* Место на телефоне кончилось — обычно из-за накопленных фотографий.
+         Молчать нельзя: иначе визит исчезнет, а менеджер будет уверен, что сохранил. */
+      toast('Не хватает места на телефоне. Отправьте старые визиты и удалите их.');
+      beacon('quota', e.name); return false;
+    } },
   get(id){ return DB.all().find(v=>v.id===id) },
   del(id){ localStorage.setItem('visits',JSON.stringify(DB.all().filter(v=>v.id!==id))); },
   /* Визиты текущего сотрудника. Записи без uid — сделанные до появления входа,
@@ -154,8 +161,12 @@ const JOTFORM = {
        await mkUser('Иванов Иван Иванович', 'длинный-пароль', '+7 900 000-00-00')
    и вставить напечатанную строку в массив USERS ниже, затем опубликовать файл.  */
 const AUTH_CFG = {
-  sessionHours:12,     // сколько живёт вход, потом просят пароль заново
-  lockMinutes:15,      // бездействие, после которого экран блокируется
+  /* Полевая работа: телефон весь день в кармане между клиентами. Длинный
+     пароль вводится один раз при подключении устройства, дальше — короткий
+     ПИН. Пароль спрашивается снова только через месяц или после выхода. */
+  sessionDays:30,      // сколько живёт подключение устройства
+  lockMinutes:60,      // бездействие, после которого просят ПИН
+  pinLength:4,
   maxAttempts:5,       // неудачных попыток до временной блокировки
   lockoutMinutes:5,
   iterations:200000
@@ -284,13 +295,34 @@ const SESSION = {
   start(u){
     localStorage.setItem('session', JSON.stringify({
       uid:u.id, name:u.name, phone:u.phone, role:u.role,
-      exp:Date.now()+AUTH_CFG.sessionHours*3600e3, seen:Date.now()
+      exp:Date.now()+AUTH_CFG.sessionDays*864e5, seen:Date.now()
     }));
   },
   touch(){ const s=SESSION.read(); if(s){ s.seen=Date.now(); localStorage.setItem('session',JSON.stringify(s)); } },
   /* Долго не трогали — просим пароль заново, но пользователя не меняем */
   isIdle(){ const s=SESSION.read(); return !!s && (Date.now()-s.seen > AUTH_CFG.lockMinutes*60000); },
   end(){ localStorage.removeItem('session'); }
+};
+
+/* --- Быстрый вход по ПИН ---
+   ПИН живёт только на этом телефоне и только как хэш: в код он не попадает
+   и на другом устройстве не работает. Защищает от того, кто взял телефон
+   в руки, — а от подбора по исходникам защищает длинный пароль, без него
+   устройство не подключить. */
+const PIN = {
+  read(){ try{ return JSON.parse(localStorage.getItem('pin')||'null'); }catch(e){ return null; } },
+  has(uid){ const p=PIN.read(); return !!p && p.uid===uid; },
+  async set(uid, pin){
+    const salt=crypto.getRandomValues(new Uint8Array(16));
+    const hash=await _pbkdf2(pin, salt, AUTH_CFG.iterations);
+    localStorage.setItem('pin', JSON.stringify({uid, salt:_b64(salt), hash}));
+  },
+  async verify(uid, pin){
+    const p=PIN.read();
+    if(!p || p.uid!==uid) return false;
+    return _eq(await _pbkdf2(pin, _ub64(p.salt), AUTH_CFG.iterations), p.hash);
+  },
+  clear(){ localStorage.removeItem('pin'); }
 };
 
 let user = SESSION.read();
@@ -306,12 +338,17 @@ function clearDraft(){ localStorage.removeItem('draft'); }
 function restoreDraft(){
   try{
     const d=JSON.parse(localStorage.getItem('draft')||'null');
-    if(d && d.cur){ cur=d.cur; view=d.view && d.view.name!=='list' ? d.view : {name:'step',i:0}; return true; }
+    if(!d || !d.cur) return false;
+    /* Завершённый визит черновиком не считается: он уже лежит в списке.
+       Подстраховка для телефонов, где такой черновик остался от прежней версии. */
+    if(DB.get(d.cur.id)){ clearDraft(); return false; }
+    cur=d.cur; view=d.view && d.view.name!=='list' ? d.view : {name:'step',i:0};
+    return true;
   }catch(e){}
   return false;
 }
 /* Любая ошибка — на экран и в лог сервера (удалённая диагностика) */
-const APP_V='12';
+const APP_V='18';
 function beacon(tag,msg){ try{ fetch('/__log/'+tag+'?v='+APP_V+'&m='+encodeURIComponent((msg||'').slice(0,300))).catch(()=>{});}catch(e){} }
 window.addEventListener('error',e=>{ toast('Ошибка: '+e.message); beacon('err', e.message+' @'+(e.filename||'')+':'+(e.lineno||'')); });
 window.addEventListener('unhandledrejection',e=>{ beacon('rej', String(e.reason)); });
@@ -329,7 +366,7 @@ function go(v){ view=v; saveDraft(); render(); window.scrollTo(0,0); }
 function newVisit(){
   cur={ id:'v'+Date.now(), created:Date.now(), status:'local',
     uid:user?user.uid:'', manager:user?user.name:'', managerPhone:user?user.phone:'',
-    gps:null, address:'', company:'', inn:'', contact:'', phone:'',
+    gps:null, address:'', company:'', contact:'', phone:'',
     photos:[], equip:{}, needs:{}, result:'', next:'', comment:'' };
   go({name:'step',i:0});
 }
@@ -392,26 +429,65 @@ async function doLogin(){
   SESSION.start(rec);
   user=SESSION.read(); locked=false;
   toast('Здравствуйте, '+(rec.name.split(' ')[1]||rec.name)+'!');
+  /* Пароль длинный, вводить его каждый раз невозможно — сразу предлагаем ПИН */
+  if(!PIN.has(rec.id)) return go({name:'pinset'});
+  go({name:'list'});
+}
+
+/* Придумывание ПИН сразу после подключения устройства */
+function renderPinSet(){
+  $('#title').textContent='Быстрый вход';
+  $('#stepLabel').textContent='';
+  $('#back').style.display='none';
+  app.innerHTML=`<div class="card" style="margin-top:30px">
+    <h2>🔓 Придумайте ПИН</h2>
+    <div class="muted">Пароль больше не понадобится: приложение будет спрашивать
+    только эти ${AUTH_CFG.pinLength} цифры. Пароль потребуется снова через месяц
+    или если вы выйдете из учётной записи.</div>
+    <label>ПИН из ${AUTH_CFG.pinLength} цифр</label>
+    <input id="pin1" type="password" inputmode="numeric" maxlength="${AUTH_CFG.pinLength}"
+      autocomplete="new-password">
+    <label>Повторите</label>
+    <input id="pin2" type="password" inputmode="numeric" maxlength="${AUTH_CFG.pinLength}"
+      autocomplete="new-password" onkeydown="if(event.key==='Enter')doPinSet()">
+    <button class="btn" id="pinBtn" onclick="doPinSet()">Сохранить</button>
+    <div class="muted" id="pinMsg" style="margin-top:10px"></div>
+  </div>`;
+}
+
+async function doPinSet(){
+  const a=$('#pin1').value.trim(), b=$('#pin2').value.trim(), msg=$('#pinMsg');
+  const n=AUTH_CFG.pinLength;
+  if(!/^\d+$/.test(a) || a.length!==n){ msg.textContent=`Нужны ровно ${n} цифры`; return; }
+  if(a!==b){ msg.textContent='ПИН не совпадает'; $('#pin2').value=''; return; }
+  if(/^(\d)\1+$/.test(a) || a==='1234' || a==='0000'){
+    msg.textContent='Слишком простой ПИН — подберут с первой попытки'; return;
+  }
+  $('#pinBtn').disabled=true; msg.textContent='Сохраняю…';
+  await PIN.set(user.uid, a);
+  $('#pinBtn').disabled=false;
+  toast('Готово — дальше только ПИН');
   go({name:'list'});
 }
 
 /* Экран блокировки: сессия жива, но приложение долго не трогали.
    Пользователя не меняем — только подтверждаем, что за телефоном тот же человек. */
 function renderLock(){
-  $('#title').textContent='Блокировка';
+  $('#title').textContent='Вход';
   $('#stepLabel').textContent='';
   $('#back').style.display='none';
-  const s=SESSION.read();
+  const s=SESSION.read(), byPin=PIN.has(s.uid);
   app.innerHTML=`<div class="card" style="margin-top:30px">
-    <h2>🔒 Сеанс заблокирован</h2>
-    <div class="muted">${esc(s.name)} · нет активности более ${AUTH_CFG.lockMinutes} мин.</div>
-    <label>Пароль</label>
-    <input id="lockPass" type="password" autocomplete="current-password"
-      onkeydown="if(event.key==='Enter')doUnlock()">
-    <button class="btn" id="lockBtn" onclick="doUnlock()">Разблокировать</button>
-    <button class="btn ghost" onclick="logout(true)">Выйти под другим пользователем</button>
+    <h2>🔒 ${esc(s.name.split(' ').slice(0,2).join(' '))}</h2>
+    <label>${byPin?`ПИН из ${AUTH_CFG.pinLength} цифр`:'Пароль'}</label>
+    <input id="lockPass" type="password"
+      ${byPin?`inputmode="numeric" maxlength="${AUTH_CFG.pinLength}"`:''}
+      autocomplete="current-password" onkeydown="if(event.key==='Enter')doUnlock()">
+    <button class="btn" id="lockBtn" onclick="doUnlock()">Войти</button>
+    <button class="btn ghost" onclick="logout(true)">Это другой сотрудник</button>
     <div class="muted" id="lockMsg" style="margin-top:10px"></div>
   </div>`;
+  setTimeout(()=>{ const i=$('#lockPass'); if(i) i.focus(); },50);
 }
 
 async function doUnlock(){
@@ -423,25 +499,40 @@ async function doUnlock(){
   const wait=ATTEMPTS.lockedFor(s.uid);
   if(wait){ msg.textContent=`Слишком много попыток. Подождите ${wait} с.`; return; }
 
+  const byPin=PIN.has(s.uid), val=$('#lockPass').value;
   btn.disabled=true; msg.textContent='Проверяю…';
   let ok=false;
-  try{ ok=await verifyPassword(rec,$('#lockPass').value); }catch(e){}
+  try{ ok = byPin ? await PIN.verify(s.uid,val) : await verifyPassword(rec,val); }catch(e){}
   btn.disabled=false;
 
   if(!ok){
     const left=ATTEMPTS.fail(s.uid);
-    msg.textContent = left>0 ? `Неверный пароль. Осталось попыток: ${left}`
-      : `Заблокировано на ${AUTH_CFG.lockoutMinutes} мин.`;
-    $('#lockPass').value='';
+    if(left>0){
+      msg.textContent=(byPin?'Неверный ПИН. ':'Неверный пароль. ')+`Осталось попыток: ${left}`;
+      $('#lockPass').value='';
+    }else if(byPin){
+      /* ПИН перебирают — сбрасываем его: дальше только полный пароль */
+      PIN.clear(); ATTEMPTS.clear(s.uid); SESSION.end();
+      user=null; locked=false;
+      toast('ПИН сброшен — войдите по паролю');
+      render();
+    }else{
+      msg.textContent=`Заблокировано на ${AUTH_CFG.lockoutMinutes} мин.`;
+      $('#lockPass').value='';
+    }
     return;
   }
   ATTEMPTS.clear(s.uid);
-  SESSION.touch(); locked=false; render();
+  SESSION.touch(); locked=false;
+  if(!PIN.has(s.uid)) return go({name:'pinset'});
+  render();
 }
 
 function logout(force){
   if(!force && !confirm('Выйти? Сохранённые визиты останутся на устройстве.')) return;
-  SESSION.end(); user=null; locked=false; cur=null; clearDraft(); render();
+  /* ПИН привязан к сотруднику — при выходе он не должен пускать следующего */
+  SESSION.end(); PIN.clear();
+  user=null; locked=false; cur=null; clearDraft(); render();
 }
 
 /* ---------- GPS ---------- */
@@ -483,6 +574,7 @@ function render(){
   if(!user) return renderLogin();
   if(locked || SESSION.isIdle()){ locked=true; return renderLock(); }
   SESSION.touch();
+  if(view.name==='pinset') return renderPinSet();
   const back=$('#back');
   back.style.display = view.name==='list' ? 'none':'inline-block';
   back.onclick=()=>{
@@ -507,15 +599,31 @@ function renderList(){
   const v=DB.mine();
   app.innerHTML = `<div class="muted" style="margin-bottom:10px">👤 ${esc(user.name)}
     · <a href="#" onclick="logout();return false" style="color:var(--brand)">выйти</a></div>`;
-  app.innerHTML += v.length? v.map(x=>`
+  /* Сводка по неотправленным — первое, что видит менеджер, если что-то зависло */
+  const wait=v.filter(x=>x.status!=='sent');
+  if(wait.length){
+    const bad=wait.filter(x=>missingRequired(x).length).length;
+    app.innerHTML += `<div class="card" style="border-color:var(--warn)">
+      <b>⏳ Не отправлено: ${wait.length}</b>
+      <div class="muted" style="margin-top:4px">${navigator.onLine
+        ? 'Связь есть — можно отправить сейчас.'
+        : 'Сети нет. Отправлю сам, как только появится.'}${bad?` У ${bad} не заполнены обязательные поля.`:''}</div>
+      ${navigator.onLine?`<button class="btn" onclick="flushQueue()">Отправить сейчас</button>`:''}
+    </div>`;
+  }
+  app.innerHTML += v.length? v.map(x=>{
+    const st = x.status==='sent' ? {c:'sent', t:'В CRM'}
+      : missingRequired(x).length ? {c:'local', t:'Не заполнен'}
+      : {c:'local', t:'Не отправлен'};
+    return `
     <div class="visit" onclick="go({name:'view',id:'${x.id}'})">
       <div class="ico">📍</div>
       <div style="flex:1;min-width:0">
         <div class="t">${esc(x.company)||'Без названия'}</div>
         <div class="s">${fmtDate(x.created)} · фото: ${x.photos.length}${x.gps?' · GPS ✓':''}</div>
       </div>
-      <span class="badge ${x.status==='sent'?'sent':'local'}">${x.status==='sent'?'В CRM':'Локально'}</span>
-    </div>`).join('')
+      <span class="badge ${st.c}">${st.t}</span>
+    </div>`}).join('')
     : `<div class="empty"><div class="big">🗺️</div>Пока нет визитов.<br>Нажмите «Новый визит», чтобы начать.</div>`;
   app.innerHTML += `<button class="fab" onclick="newVisit()">＋ Новый визит</button>`;
 }
@@ -536,11 +644,16 @@ function renderStep(){
   }
   if(i===1){ html+=`
     <div class="card"><h2>🏢 Клиент</h2>
-      <label>Название компании</label><input value="${esc(cur.company)}" oninput="cur.company=this.value">
-      <label>ИНН</label><input inputmode="numeric" value="${esc(cur.inn)}" oninput="cur.inn=this.value">
+      <div class="muted">Название и телефон — то, по чему партнёра находят в базе.
+      Без них визит не отправится.</div>
+      <label>Название партнёра <b style="color:var(--danger)">*</b></label>
+      <input value="${esc(cur.company)}" oninput="cur.company=this.value">
       <hr><h2>👤 Контактное лицо</h2>
       <label>ФИО</label><input value="${esc(cur.contact)}" oninput="cur.contact=this.value">
-      <label>Телефон</label><input inputmode="tel" value="${esc(cur.phone)}" oninput="cur.phone=this.value">
+      <label>Мобильный телефон <b style="color:var(--danger)">*</b></label>
+      <input inputmode="tel" value="${esc(cur.phone)}" placeholder="79263959673"
+        oninput="cur.phone=this.value"
+        onblur="cur.phone=normPhone(this.value); this.value=cur.phone; saveDraft()">
     </div>`;
   }
   if(i===2){ html+=`
@@ -622,8 +735,16 @@ function renderNeed(){
 }
 
 function finish(){
-  cur.created=cur.created||Date.now(); DB.save(cur); clearDraft();
-  toast('Визит сохранён на устройстве'); go({name:'list'});
+  cur.created=cur.created||Date.now();
+  if(!DB.save(cur)) return;              // не сохранилось — не уводим с экрана
+  const id=cur.id;
+  /* Обнуляем ДО перехода: go() вызывает saveDraft(), и при заполненном cur
+     черновик записался бы обратно сразу после удаления — тогда при следующем
+     запуске приложение открывало бы уже завершённый визит. */
+  cur=null; clearDraft(); go({name:'list'});
+  /* Отправляем сразу. Не получилось — визит встаёт в очередь и уйдёт сам,
+     как только появится сеть. Менеджер про отправку думать не должен. */
+  sendToCRM(id,{auto:true});
 }
 
 function renderView(){
@@ -637,7 +758,6 @@ function renderView(){
    <div class="card">
      <span class="badge ${v.status==='sent'?'sent':'local'}">${v.status==='sent'?'В CRM':'Локально'}</span>
      <h2 style="margin-top:10px">🏢 ${esc(v.company)||'—'}</h2>
-     <div class="muted">ИНН ${esc(v.inn)||'—'}</div>
      <p>${esc(v.contact)} · ${esc(v.phone)}</p>
      <hr>
      <div class="muted">🗓 Дата визита: <b>${fmtDateFull(v.created)}</b></div>
@@ -674,9 +794,11 @@ function visitFields(v){
   o[m.gps]      = v.gps?`${v.gps.lat}, ${v.gps.lng} (±${v.gps.acc} м)`:'';
   o[m.address]  = v.address||'';
   o[m.company]  = v.company||'';
+  /* ИНН убран из анкеты по просьбе менеджеров. Поле в форме оставлено:
+     визиты, заполненные до этого, всё ещё донесут его в CRM. */
   o[m.inn]      = v.inn||'';
   o[m.contact]  = v.contact||'';
-  o[m.phone]    = v.phone||'';
+  o[m.phone]    = normPhone(v.phone);
   o[m.photoNotes]= v.photos.map((p,i)=>`Фото ${i+1}: ${p.note||'—'}`).join('\n');
   o[m.equip]    = Object.keys(v.equip).filter(g=>v.equip[g].items&&v.equip[g].items.length)
     .map(g=>g+': '+v.equip[g].items.join(', ')).join('\n')||'не отмечено';
@@ -690,10 +812,25 @@ function visitFields(v){
   return o;
 }
 
-/* Обязательные поля формы. Если их не заполнить, Jotform молча отбрасывает
-   всю отправку — именно на этом визиты и терялись. */
+/* Приводит телефон к принятому у нас виду: 11 цифр подряд, начиная с 7 —
+   79263959673. Партнёр опознаётся по названию и номеру, поэтому
+   «8 (926) 395-96-73» и «+7 926 395 96 73» должны стать одной строкой,
+   иначе в базе это два разных контакта. Нероссийские и нестандартные
+   номера оставляем как ввели — калечить их хуже. */
+function normPhone(s){
+  const raw=String(s||'').trim();
+  const d=raw.replace(/\D/g,'');
+  if(d.length===11 && (d[0]==='8'||d[0]==='7')) return '7'+d.slice(1);
+  if(d.length===10) return '7'+d;
+  return raw;
+}
+
+/* Обязательные поля. Часть требует сама форма Jotform — без них она молча
+   отбрасывает отправку целиком. Телефон добавлен нами: вместе с названием
+   это то, по чему партнёра находят в базе. */
 function missingRequired(v){
-  const need=[['company','Название компании'],['address','Адрес клиента']];
+  const need=[['company','Название компании'],['address','Адрес клиента'],
+              ['phone','Телефон контакта']];
   const out=need.filter(([k])=>!String(v[k]||'').trim()).map(([,label])=>label);
   if(!(v.manager||(user&&user.name))) out.push('ФИО менеджера');
   return out;
@@ -704,16 +841,28 @@ function missingRequired(v){
    поэтому об отказе Jotform приложение узнать не может. Пробовали заменить
    на отправку настоящей формой в iframe, чтобы видеть ответ: Jotform такие
    отправки не принимает совсем, поэтому вернулись к рабочему варианту. */
-async function sendToCRM(id){
-  const v=DB.get(id); if(!v)return;
-  if(!navigator.onLine){ toast('Нет сети — попробуйте позже'); return; }
+async function sendToCRM(id, opt){
+  opt=opt||{};
+  const v=DB.get(id); if(!v)return false;
+  if(v.status==='sent') return true;
 
   /* Форма отбраковывает отправку целиком, если пусто обязательное поле.
      Ловим это до отправки, иначе визит пропал бы молча. */
   const miss=missingRequired(v);
-  if(miss.length){ toast('Не заполнено: '+miss.join(', ')); return; }
+  if(miss.length){
+    v.status='incomplete'; v.lastError='не заполнено: '+miss.join(', '); DB.save(v);
+    if(!opt.silent) toast('Не заполнено: '+miss.join(', '));
+    render(); return false;
+  }
 
-  toast('Отправляю…');
+  if(!navigator.onLine){
+    v.status='queued'; v.lastError='нет сети'; DB.save(v);
+    if(!opt.silent) toast('Нет сети — визит в очереди, отправлю сам');
+    render(); return false;
+  }
+
+  if(!opt.silent) toast(opt.auto?'Отправляю визит…':'Отправляю…');
+
   const fd=new FormData();
   fd.append('formID',JOTFORM.formID);
   const flds=visitFields(v);
@@ -722,16 +871,50 @@ async function sendToCRM(id){
     fd.append(JOTFORM.map.photos, dataURLtoBlob(p.data), `photo${i+1}.jpg`);
   }catch(e){ beacon('photoerr', e.message); } });
 
+  /* На слабой связи запрос может висеть бесконечно — обрываем сами,
+     иначе менеджер смотрит в «Отправляю…» и не понимает, что делать. */
+  const ac=new AbortController();
+  const killer=setTimeout(()=>ac.abort(), 60000);
   try{
-    await fetch(JOTFORM.action,{method:'POST',body:fd,mode:'no-cors'});
-    v.status='sent'; v.sentAt=Date.now(); DB.save(v);
-    toast('Визит отправлен ✓');
+    await fetch(JOTFORM.action,{method:'POST',body:fd,mode:'no-cors',signal:ac.signal});
+    clearTimeout(killer);
+    v.status='sent'; v.sentAt=Date.now(); v.lastError=''; DB.save(v);
+    if(!opt.silent) toast('Визит отправлен ✓');
+    render(); return true;
   }catch(e){
-    toast('Не удалось отправить: '+e.message);
-    beacon('senderr', e.message);
+    clearTimeout(killer);
+    v.status='queued';
+    v.lastError = e.name==='AbortError' ? 'связь слишком медленная' : (e.message||'сбой сети');
+    DB.save(v);
+    if(!opt.silent) toast('Связи нет — визит в очереди, отправлю сам');
+    beacon('senderr', v.lastError);
+    render(); return false;
   }
+}
+
+/* ---------- Очередь неотправленных ----------
+   Главное в полевой работе: у клиента связи часто нет вовсе. Визит копится
+   на телефоне и уходит сам, как только сеть появится — переспрашивать
+   менеджера и надеяться, что он вспомнит, нельзя. */
+function pendingVisits(){
+  return DB.all().filter(v=>v.status!=='sent' && !missingRequired(v).length);
+}
+let _flushing=false;
+async function flushQueue(opt){
+  opt=opt||{};
+  if(_flushing || !navigator.onLine) return;
+  const list=pendingVisits();
+  if(!list.length) return;
+  _flushing=true;
+  let ok=0;
+  for(const v of list){ if(await sendToCRM(v.id,{silent:true})) ok++; }
+  _flushing=false;
+  if(ok) toast(ok===1?'Визит отправлен ✓':`Отправлено визитов: ${ok} ✓`);
+  else if(!opt.quiet) toast('Отправить не удалось — попробую снова при связи');
   render();
 }
+/* Сеть вернулась — досылаем без участия менеджера */
+window.addEventListener('online', ()=>flushQueue({quiet:true}));
 function exportVisit(id){
   const v=DB.get(id); const blob=new Blob([JSON.stringify(v,null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
@@ -747,12 +930,16 @@ window.addEventListener('pagehide',saveDraft);
 document.addEventListener('visibilitychange',()=>{
   if(document.hidden){ saveDraft(); SESSION.touch(); }
   else if(SESSION.read() && SESSION.isIdle()){ locked=true; render(); }
+  /* Телефон часто цепляет Wi-Fi, пока приложение свёрнуто — проверяем очередь */
+  else if(!document.hidden) flushQueue({quiet:true});
 });
 
 /* ---------- PWA ---------- */
 if('serviceWorker' in navigator){navigator.serviceWorker.register('sw.js').catch(()=>{});}
 if(restoreDraft()) toast('Восстановлен незавершённый визит');
 render();
+/* При запуске досылаем всё, что осталось с прошлых выездов */
+setTimeout(()=>flushQueue({quiet:true}), 1500);
 </script>
 </body>
 </html>
